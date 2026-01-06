@@ -6,6 +6,7 @@ import { productionSimulatorOpen, productionSimulatorTargetId } from "../state/e
 import { workingStockQuantities } from "../state/inventorySignals.ts";
 import { createEmptyGraph, addNode } from "../domain/dag.ts";
 import { checkStockAvailability } from "../domain/stock.ts";
+import { convertToDisplay } from "../utils/units.ts";
 
 interface SimulationHistory {
   id: string;
@@ -308,6 +309,21 @@ export default function ProductionSimulator() {
     setExpandedNodes(next);
   }
 
+  function formatUnitsWithWeight(units: number, node?: Node): string {
+    if (!Number.isFinite(units)) return "";
+    if (!node) return `${units} ${units === 1 ? "unit" : "units"}`;
+    if (node.type === "recipe") {
+      const recipe = node as import("../domain/types.ts").Recipe;
+      const weightPerUnit = recipe.weight;
+      const unit = recipe.unit;
+      if (typeof weightPerUnit === "number" && weightPerUnit > 0 && unit) {
+        const display = convertToDisplay(weightPerUnit * units, unit);
+        return `${units} ${units === 1 ? "unit" : "units"} (${display.value.toFixed(2)} ${display.unit})`;
+      }
+    }
+    return `${units} ${units === 1 ? "unit" : "units"}`;
+  }
+
   function renderInputTreeNode(node: InputTreeNode, currentStock: Map<NodeId, number>, depth: number = 0): JSX.Element {
     const nodeData = nodes.find(n => n.id === node.nodeId);
     const isExpanded = expandedNodes.has(node.nodeId);
@@ -316,6 +332,8 @@ export default function ProductionSimulator() {
 
     // If a recipe/product is short in stock but can be produced from its own inputs, show a different status.
     let status: "sufficient" | "craftable" | "shortage" = "shortage";
+    let produceUnits: number | undefined = undefined;
+    let missing: number | undefined = undefined;
     if (node.sufficient) {
       status = "sufficient";
     } else if (!isIngredient && graph.nodes.has(node.nodeId)) {
@@ -323,8 +341,8 @@ export default function ProductionSimulator() {
       // When a recipe/product is used as an input, the engine can satisfy fractional
       // requirements by producing integer units (ceil(shortfall)) and consuming the needed fraction.
       // So we consider it "craftable" only if we can produce ceil(required - available) whole units.
-      const missing = Math.max(0, node.required - node.available);
-      const produceUnits = Math.ceil(missing);
+      missing = Math.max(0, node.required - node.available);
+      produceUnits = Math.ceil(missing);
       const key = `${node.nodeId}:produce:${produceUnits}`;
       const cached = craftableCacheRef.current.get(key);
       const craftable = typeof cached === "boolean"
@@ -394,7 +412,23 @@ export default function ProductionSimulator() {
             )}
             {status === "craftable" && (
               <span style={{ color: "#3b82f6" }}>
-                ↻ Will produce ({(node.required - node.available).toFixed(2)} needed)
+                {(() => {
+                  const producedText = produceUnits !== undefined && produceUnits > 0
+                    ? formatUnitsWithWeight(produceUnits, nodeData)
+                    : null;
+                  const leftoverUnits = produceUnits !== undefined && missing !== undefined
+                    ? Math.max(produceUnits - missing, 0)
+                    : undefined;
+                  const leftoverText = leftoverUnits !== undefined
+                    ? formatUnitsWithWeight(leftoverUnits, nodeData)
+                    : null;
+                  return (
+                    <>
+                      ↻ Will produce{producedText ? ` ${producedText}` : ""}
+                      {leftoverText ? ` · leftover ${leftoverText}` : ""}
+                    </>
+                  );
+                })()}
               </span>
             )}
             {status === "shortage" && (
@@ -564,15 +598,6 @@ export default function ProductionSimulator() {
           </button>
         </div>
         
-        {selectedNode && (
-          <div style={{ marginBottom: "1rem", padding: "0.75rem", background: "#f9fafb", borderRadius: "4px" }}>
-            <div class="info-box-content">
-              <div class="info-box-content__label">Product</div>
-              <div class="info-box-content__value">{selectedNode.name}</div>
-            </div>
-          </div>
-        )}
-        
         {error && <div class="error">{error}</div>}
 
         {loadingMax ? (
@@ -581,53 +606,66 @@ export default function ProductionSimulator() {
           </div>
         ) : maxQuantity !== null ? (
           <>
-            <div style={{ marginBottom: "1rem", padding: "0.75rem", background: maxQuantity > 0 ? "#f0fdf4" : "#fef2f2", borderRadius: "4px" }}>
-              <div class="info-box-content">
-                <div class="info-box-content__label">Maximum Producible</div>
-                <div class="info-box-content__value" style={{ color: maxQuantity > 0 ? "#10b981" : "#ef4444" }}>
-                  {maxQuantity} {maxQuantity === 1 ? "unit" : "units"}
-                </div>
-              </div>
-              {maxQuantity === 0 && (
-                <div style={{ marginTop: "0.5rem", fontSize: "0.875rem", color: "#6b7280" }}>
-                  Cannot produce - insufficient ingredients or missing inputs.
+            <div style={{ display: "flex", gap: "1rem", marginBottom: "1rem" }}>
+              {selectedNode && (
+                <div style={{ flex: 1, padding: "0.75rem", background: "#f9fafb", borderRadius: "4px" }}>
+                  <div class="info-box-content">
+                    <div class="info-box-content__label">Product</div>
+                    <div class="info-box-content__value">{selectedNode.name}</div>
+                  </div>
                 </div>
               )}
+              
+              <div style={{ flex: 1, padding: "0.75rem", background: maxQuantity > 0 ? "#f0fdf4" : "#fef2f2", borderRadius: "4px" }}>
+                <div class="info-box-content">
+                  <div class="info-box-content__label">Maximum Producible</div>
+                  <div class="info-box-content__value" style={{ color: maxQuantity > 0 ? "#10b981" : "#ef4444" }}>
+                    {maxQuantity} {maxQuantity === 1 ? "unit" : "units"}
+                  </div>
+                </div>
+                {maxQuantity === 0 && (
+                  <div style={{ marginTop: "0.5rem", fontSize: "0.875rem", color: "#6b7280" }}>
+                    Cannot produce - insufficient ingredients or missing inputs.
+                  </div>
+                )}
+              </div>
             </div>
 
             {maxQuantity > 0 && (
               <>
-                <button
-                  class="button"
-                  onClick={(e) => {
-                    handleSimulate();
-                  }}
-                  disabled={!selectedNodeId || quantity <= 0 || quantity > maxQuantity || loading}
-                  style={{ width: "100%", marginBottom: "1rem" }}
-                >
-                  {loading ? "Simulating..." : "Simulate Production"}
-                </button>
-                
-                <div class="form-group" style={{ display: "flex", flexDirection: "column", alignItems: "flex-end" }}>
-                  <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: "0.75rem", marginBottom: "0.5rem" }}>
-                    <label class="label" style={{ margin: 0, flex: "0 0 auto" }}>Quantity</label>
-                    <input
-                      type="number"
-                      class="input"
-                      value={quantity}
-                      onInput={(e) => {
-                        const val = parseInt((e.target as HTMLInputElement).value, 10) || 0;
-                        const clamped = Math.max(1, Math.min(maxQuantity, val));
-                        setQuantity(clamped);
-                      }}
-                      min="1"
-                      max={maxQuantity}
-                      step="1"
-                      style={{ width: "150px", flex: "0 0 auto" }}
-                    />
-                  </div>
-                  <div style={{ fontSize: "0.75rem", color: "#6b7280" }}>
-                    Enter a value between 1 and {maxQuantity}
+                <div style={{ display: "flex", gap: "1rem", marginBottom: "1rem", alignItems: "flex-start" }}>
+                  <button
+                    class="button"
+                    onClick={(e) => {
+                      handleSimulate();
+                    }}
+                    disabled={!selectedNodeId || quantity <= 0 || quantity > maxQuantity || loading}
+                    style={{ flex: 1 }}
+                  >
+                    {loading ? "Simulating..." : "Simulate Production"}
+                  </button>
+                  
+                  <div class="form-group" style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "flex-end" }}>
+                    <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: "0.75rem", marginBottom: "0.5rem" }}>
+                      <label class="label" style={{ margin: 0, flex: "0 0 auto" }}>Quantity</label>
+                      <input
+                        type="number"
+                        class="input"
+                        value={quantity}
+                        onInput={(e) => {
+                          const val = parseInt((e.target as HTMLInputElement).value, 10) || 0;
+                          const clamped = Math.max(1, Math.min(maxQuantity, val));
+                          setQuantity(clamped);
+                        }}
+                        min="1"
+                        max={maxQuantity}
+                        step="1"
+                        style={{ width: "150px", flex: "0 0 auto" }}
+                      />
+                    </div>
+                    <div style={{ fontSize: "0.75rem", color: "#6b7280" }}>
+                      Enter a value between 1 and {maxQuantity}
+                    </div>
                   </div>
                 </div>
               </>

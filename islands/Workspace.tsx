@@ -583,7 +583,31 @@ function NodeList({
             statusBg = "#fef2f2";
           }
         } else if (isRecipeOrProduct) {
-          statusLabel = craftable ? "Craftable" : "Not craftable";
+          const maxProducible = row.maxProducible ?? 0;
+
+          // Clarify units to avoid ambiguity: show units and weight for recipes when available.
+          if (craftable) {
+            if (maxProducible > 0) {
+              if (row.node.type === "recipe") {
+                const recipe = row.node as any;
+                const perUnitWeight = typeof recipe.weight === "number" ? recipe.weight : 0;
+                const unit = recipe.unit;
+                if (perUnitWeight > 0 && unit) {
+                  const display = convertToDisplay(perUnitWeight * maxProducible, unit);
+                  statusLabel = `Craftable (${maxProducible} units ≈ ${display.value.toFixed(2)} ${display.unit})`;
+                } else {
+                  statusLabel = `Craftable (${maxProducible} units)`;
+                }
+              } else {
+                statusLabel = `Craftable (${maxProducible} units)`;
+              }
+            } else {
+              statusLabel = "Craftable";
+            }
+          } else {
+            statusLabel = "Not craftable";
+          }
+
           statusColor = craftable ? "#10b981" : "#ef4444";
           statusBg = craftable ? null : "#fef2f2";
         }

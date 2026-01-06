@@ -4,7 +4,7 @@ import type { Node, NodeId, Stock, Inventory, Graph, NodeType } from "../../doma
 import { eventBus } from "../../events/bus.ts";
 import { workingStockQuantities } from "../../state/inventorySignals.ts";
 import { createEmptyGraph, addNode } from "../../domain/dag.ts";
-import { checkStockAvailability, detectLowStock, getProductionReadiness } from "../../domain/stock.ts";
+import { checkStockAvailability, detectLowStock, getProductionReadiness, getMaxProducibleQuantity } from "../../domain/stock.ts";
 import { calculateNodeCost, clearCalculationCache } from "../../domain/calculations.ts";
 import { convertToDisplay } from "../../utils/units.ts";
 
@@ -16,6 +16,8 @@ export interface WorkspaceNodeRow {
   // "Craftable" means: can we produce +1 more from inputs (ignores existing stock).
   // Only meaningful for recipes/products.
   craftable?: boolean;
+  // Maximum producible quantity given current stock. Only meaningful for recipes/products.
+  maxProducible?: number;
   unitCost: number;
   // For ingredients: package info
   packageDisplay?: { value: number; unit: string };
@@ -316,6 +318,9 @@ export function useWorkspaceData() {
     const craftable = (node.type === "recipe" || node.type === "product")
       ? checkStockAvailability(graph, node.id, 1, stockMap).available
       : undefined;
+    const maxProducible = (node.type === "recipe" || node.type === "product")
+      ? getMaxProducibleQuantity(graph, node.id, stockMap)
+      : undefined;
 
     let unitCost = 0;
     try {
@@ -338,6 +343,7 @@ export function useWorkspaceData() {
       isLowStock,
       readiness,
       craftable,
+      maxProducible,
       unitCost,
     };
 
