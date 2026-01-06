@@ -1,0 +1,7 @@
+{
+  "debug": {
+    "API": false,
+    "Repository": false,
+    "EntityEditor": false
+  }
+}

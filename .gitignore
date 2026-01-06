@@ -1,0 +1,59 @@
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Editor settings
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Environment secrets
+.env
+.env.*
+!.env.example
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+*.log
+
+# Deno / Fresh build output
+.fresh/
+_fresh/
+
+# Deno KV datastore files
+denokv.sqlite
+denokv.sqlite-shm
+denokv.sqlite-wal
+
+# Node compatibility cache
+node_modules/
+
+# Coverage / build artifacts
+coverage/
+dist/
+tmp/
+# Fresh
+_fresh/
+.fresh/
+
+# Deno
+*.lock
+
+# Environment
+.env
+.env.local
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
