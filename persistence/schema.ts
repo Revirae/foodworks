@@ -16,6 +16,7 @@ export const KEY_PREFIXES = {
   META: "meta",
   INVENTORY: "inventory",
   INVENTORY_STOCK: "inventory_stock",
+  PRODUCTION_ORDER: "production_order",
 } as const;
 
 /**
@@ -79,6 +80,13 @@ export function inventoryStockKey(inventoryId: string, nodeId: string): string {
  */
 export function activeInventoryKey(): string {
   return metaKey("active_inventory_id");
+}
+
+/**
+ * Creates a production order key
+ */
+export function productionOrderKey(inventoryId: string, orderId: string): string {
+  return `${KEY_PREFIXES.PRODUCTION_ORDER}:${inventoryId}:${orderId}`;
 }
 
 /**

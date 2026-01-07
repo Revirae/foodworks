@@ -1,25 +1,38 @@
 import { useState, useEffect, useRef } from "preact/hooks";
+import { useSignal } from "@preact/signals";
 import type { Node, NodeId, NodeType, Stock, Inventory } from "../domain/types.ts";
-import { selectedNodeId, selectedNodeType, editingEntity, editorNodeType, isEditorOpen, productionSimulatorOpen, productionSimulatorTargetId } from "../state/entitySignals.ts";
+import { selectedNodeId, selectedNodeType, editingEntity, editorNodeType, isEditorOpen, productionSimulatorOpen, productionSimulatorTargetId, activeWorkspaceTab } from "../state/entitySignals.ts";
 import { workingStockQuantities } from "../state/inventorySignals.ts";
 import { useWorkspaceData, type WorkspaceNodeRow } from "./workspace/useWorkspaceData.ts";
 import InventoryPopover from "./workspace/InventoryPopover.tsx";
 import EntityEditor from "./EntityEditor.tsx";
 import ProductionSimulator from "./ProductionSimulator.tsx";
+import ProductionOrdersPanel from "./ProductionOrdersPanel.tsx";
 import CostTimeBreakdown from "./CostTimeBreakdown.tsx";
 import { convertToDisplay } from "../utils/units.ts";
 import { emitStockChanged } from "../events/bus.ts";
 
 type EntityTab = "ingredient" | "recipe" | "product";
+type WorkspaceTab = EntityTab | "produce";
 
 export default function Workspace() {
   const data = useWorkspaceData();
+  const activeTab = useSignal(activeWorkspaceTab.value);
   const [entityTab, setEntityTab] = useState<EntityTab>("ingredient");
   const [searchQuery, setSearchQuery] = useState("");
   const [showInventoryPopover, setShowInventoryPopover] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const [stockDraft, setStockDraft] = useState<number>(0);
+
+  // Sync activeTab signal with local state
+  useEffect(() => {
+    const currentTab = activeWorkspaceTab.value;
+    activeTab.value = currentTab;
+    if (currentTab !== "produce" && (currentTab === "ingredient" || currentTab === "recipe" || currentTab === "product")) {
+      setEntityTab(currentTab);
+    }
+  }, [activeWorkspaceTab.value]);
 
   // Focus search on mount
   useEffect(() => {
@@ -341,40 +354,79 @@ export default function Workspace() {
         {(["ingredient", "recipe", "product"] as EntityTab[]).map((type) => (
           <button
             key={type}
-            onClick={() => setEntityTab(type)}
-            aria-pressed={entityTab === type}
+            onClick={() => {
+              setEntityTab(type);
+              activeWorkspaceTab.value = type;
+              activeTab.value = type;
+            }}
+            aria-pressed={activeTab.value === type}
             style={{
               appearance: "none",
               background: "transparent",
               border: "none",
-              borderBottom: entityTab === type ? "2px solid #3b82f6" : "2px solid transparent",
-              color: entityTab === type ? "#111827" : "#6b7280",
+              borderBottom: activeTab.value === type ? "2px solid #3b82f6" : "2px solid transparent",
+              color: activeTab.value === type ? "#111827" : "#6b7280",
               padding: "0.75rem 0.75rem",
               fontSize: "0.875rem",
-              fontWeight: entityTab === type ? 600 : 500,
+              fontWeight: activeTab.value === type ? 600 : 500,
               cursor: "pointer",
             }}
           >
             {type === "ingredient" ? "Ingredients" : type === "recipe" ? "Recipes" : "Products"}
           </button>
         ))}
+        <div style={{ flex: 1 }} />
+        <button
+          onClick={() => {
+            activeWorkspaceTab.value = "produce";
+            activeTab.value = "produce";
+          }}
+          aria-pressed={activeTab.value === "produce"}
+          style={{
+            appearance: "none",
+            background: "transparent",
+            border: "none",
+            borderBottom: activeTab.value === "produce" ? "2px solid #3b82f6" : "2px solid transparent",
+            color: activeTab.value === "produce" ? "#111827" : "#6b7280",
+            padding: "0.75rem 0.75rem",
+            fontSize: "0.875rem",
+            fontWeight: activeTab.value === "produce" ? 600 : 500,
+            cursor: "pointer",
+          }}
+        >
+          Produce
+        </button>
       </div>
 
       {/* Content */}
       <div style={{ flex: 1, overflow: "auto", padding: "1rem" }}>
         {error && <div class="error" style={{ marginBottom: "1rem" }}>{error}</div>}
 
-        {data.loading && data.rows.length === 0 ? (
-          <p>Loading...</p>
+        {activeTab.value === "produce" ? (
+          <div style={{ display: "flex", gap: "1rem", height: "100%" }}>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <ProductionSimulator inline={true} />
+            </div>
+            <div style={{ width: "300px", borderLeft: "1px solid #e5e7eb", paddingLeft: "1rem" }}>
+              <ProductionOrdersPanel />
+            </div>
+          </div>
         ) : (
-          <NodeList
-            rows={displayRows}
-            onEditEntity={openEdit}
-            onProduce={(node) => {
-              productionSimulatorTargetId.value = node.id;
-              productionSimulatorOpen.value = true;
-            }}
-          />
+          <>
+            {data.loading && data.rows.length === 0 ? (
+              <p>Loading...</p>
+            ) : (
+              <NodeList
+                rows={displayRows}
+                onEditEntity={openEdit}
+                onProduce={(node) => {
+                  productionSimulatorTargetId.value = node.id;
+                  activeWorkspaceTab.value = "produce";
+                  activeTab.value = "produce";
+                }}
+              />
+            )}
+          </>
         )}
       </div>
 
@@ -435,10 +487,9 @@ export default function Workspace() {
                     <button
                       class="button icon-button"
                       onClick={() => {
-                        // Open production interface as modal
                         productionSimulatorTargetId.value = selectedNodeId.value;
-                        productionSimulatorOpen.value = true;
-                        // Avoid stacking modals
+                        activeWorkspaceTab.value = "produce";
+                        activeTab.value = "produce";
                         handleEditorClose();
                       }}
                       title="Produce"
@@ -538,8 +589,8 @@ export default function Workspace() {
         </div>
       )}
 
-      {/* Production Simulator (already a modal) */}
-      <ProductionSimulator />
+      {/* Production Simulator (modal mode - only when not in produce tab) */}
+      {activeTab.value !== "produce" && <ProductionSimulator />}
     </div>
   );
 }

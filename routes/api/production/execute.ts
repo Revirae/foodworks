@@ -70,13 +70,10 @@ export const handler: Handlers = {
       if (usingOverrides) {
         for (const s of data.stockOverrides!) {
           if (!s?.nodeId || typeof s.nodeId !== "string") continue;
-          if (typeof s.quantity !== "number" || !Number.isFinite(s.quantity) || s.quantity < 0) {
-            return new Response(
-              JSON.stringify({ error: `Invalid stockOverrides quantity for node ${s.nodeId}` }),
-              { status: 400, headers: { "Content-Type": "application/json" } },
-            );
-          }
-          currentStock.set(s.nodeId, s.quantity);
+          if (typeof s.quantity !== "number" || !Number.isFinite(s.quantity)) continue;
+          // Clamp negatives to zero to avoid user-facing errors from stale working copies
+          const qty = Math.max(0, s.quantity);
+          currentStock.set(s.nodeId, qty);
         }
       } else {
         // Get active inventory ID
@@ -168,10 +165,29 @@ export const handler: Handlers = {
         await emitStockChanged(result.nodeId, result.newStock, previous);
       }
 
+      // Create production order record
+      const orderId = `${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
+      const stockDeltas = simulation.stockOutcome.map(outcome => ({
+        nodeId: outcome.nodeId,
+        delta: outcome.after - outcome.before,
+      }));
+
+      await repos.productionOrder.save({
+        id: orderId,
+        inventoryId: activeInventoryId,
+        targetNodeId: data.nodeId,
+        quantity: quantity,
+        totalCost: simulation.totalCost,
+        totalTime: simulation.totalTime,
+        stockDeltas,
+        createdAt: new Date(),
+      });
+
       return new Response(JSON.stringify({ 
         success: true,
         results: batchResult.results,
-        simulation
+        simulation,
+        orderId,
       }), {
         headers: { "Content-Type": "application/json" },
       });

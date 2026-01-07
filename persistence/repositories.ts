@@ -12,6 +12,7 @@ import type {
   Stock,
   Inventory,
   InventoryStock,
+  ProductionOrder,
 } from "../domain/types.ts";
 import {
   ingredientKey,
@@ -21,6 +22,7 @@ import {
   inventoryKey,
   inventoryStockKey,
   activeInventoryKey,
+  productionOrderKey,
 } from "./schema.ts";
 import { addEdge as dagAddEdge, removeEdge as dagRemoveEdge } from "../domain/dag.ts";
 import { debug } from "../utils/log.ts";
@@ -550,6 +552,43 @@ export class InventoryStockRepository {
 }
 
 /**
+ * Production Order Repository
+ */
+export class ProductionOrderRepository {
+  constructor(private kv: Deno.Kv) {}
+
+  async get(inventoryId: string, orderId: string): Promise<ProductionOrder | null> {
+    const result = await this.kv.get<ProductionOrder>(["production_order", inventoryId, orderId]);
+    return result.value;
+  }
+
+  async getAll(inventoryId: string): Promise<ProductionOrder[]> {
+    const orders: ProductionOrder[] = [];
+    const iter = this.kv.list<ProductionOrder>({ prefix: ["production_order", inventoryId] });
+    for await (const { value } of iter) {
+      if (value) {
+        orders.push(value);
+      }
+    }
+    // Sort by createdAt descending (most recent first)
+    return orders.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+  }
+
+  async save(order: ProductionOrder): Promise<void> {
+    await this.kv.set(["production_order", order.inventoryId, order.id], order);
+  }
+
+  async delete(inventoryId: string, orderId: string): Promise<void> {
+    await this.kv.delete(["production_order", inventoryId, orderId]);
+  }
+
+  async exists(inventoryId: string, orderId: string): Promise<boolean> {
+    const result = await this.kv.get<ProductionOrder>(["production_order", inventoryId, orderId]);
+    return result.value !== null;
+  }
+}
+
+/**
  * Factory function to create all repositories
  */
 export function createRepositories(kv: Deno.Kv) {
@@ -561,6 +600,7 @@ export function createRepositories(kv: Deno.Kv) {
     stock: new StockRepository(kv),
     inventory: new InventoryRepository(kv),
     inventoryStock: new InventoryStockRepository(kv),
+    productionOrder: new ProductionOrderRepository(kv),
   };
 }
 

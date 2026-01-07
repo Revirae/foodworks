@@ -165,3 +165,19 @@ export interface ProductionSimulation {
   canProduce: boolean;
 }
 
+/**
+ * Production Order - Record of a production execution
+ */
+export interface ProductionOrder {
+  id: string;
+  inventoryId: string;
+  targetNodeId: NodeId;
+  quantity: number;
+  totalCost: number;
+  totalTime: number;
+  stockDeltas: Array<{
+    nodeId: NodeId;
+    delta: number; // Positive for production, negative for consumption
+  }>;
+  createdAt: Date;
+}

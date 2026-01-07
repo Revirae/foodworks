@@ -14,6 +14,8 @@ import * as $api_inventories_id_stocks from "./routes/api/inventories/[id]/stock
 import * as $api_inventories_active from "./routes/api/inventories/active.ts";
 import * as $api_production_execute from "./routes/api/production/execute.ts";
 import * as $api_production_max from "./routes/api/production/max.ts";
+import * as $api_production_orders_id_ from "./routes/api/production/orders/[id].ts";
+import * as $api_production_orders_index from "./routes/api/production/orders/index.ts";
 import * as $api_production_simulate from "./routes/api/production/simulate.ts";
 import * as $api_products from "./routes/api/products.ts";
 import * as $api_recipes from "./routes/api/recipes.ts";
@@ -23,12 +25,13 @@ import * as $index from "./routes/index.tsx";
 import * as $CostTimeBreakdown from "./islands/CostTimeBreakdown.tsx";
 import * as $EntityEditor from "./islands/EntityEditor.tsx";
 import * as $EntityManager from "./islands/EntityManager.tsx";
+import * as $ProductionOrdersPanel from "./islands/ProductionOrdersPanel.tsx";
 import * as $ProductionSimulator from "./islands/ProductionSimulator.tsx";
 import * as $StockDashboard from "./islands/StockDashboard.tsx";
 import * as $Workspace from "./islands/Workspace.tsx";
 import * as $workspace_InventoryPopover from "./islands/workspace/InventoryPopover.tsx";
 import * as $workspace_useWorkspaceData from "./islands/workspace/useWorkspaceData.ts";
-import { type Manifest } from "$fresh/server.ts";
+import type { Manifest } from "$fresh/server.ts";
 
 const manifest = {
   routes: {
@@ -45,6 +48,8 @@ const manifest = {
     "./routes/api/inventories/active.ts": $api_inventories_active,
     "./routes/api/production/execute.ts": $api_production_execute,
     "./routes/api/production/max.ts": $api_production_max,
+    "./routes/api/production/orders/[id].ts": $api_production_orders_id_,
+    "./routes/api/production/orders/index.ts": $api_production_orders_index,
     "./routes/api/production/simulate.ts": $api_production_simulate,
     "./routes/api/products.ts": $api_products,
     "./routes/api/recipes.ts": $api_recipes,
@@ -56,6 +61,7 @@ const manifest = {
     "./islands/CostTimeBreakdown.tsx": $CostTimeBreakdown,
     "./islands/EntityEditor.tsx": $EntityEditor,
     "./islands/EntityManager.tsx": $EntityManager,
+    "./islands/ProductionOrdersPanel.tsx": $ProductionOrdersPanel,
     "./islands/ProductionSimulator.tsx": $ProductionSimulator,
     "./islands/StockDashboard.tsx": $StockDashboard,
     "./islands/Workspace.tsx": $Workspace,

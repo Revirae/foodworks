@@ -82,7 +82,7 @@ function ensureConsumable(
   if (node.type === "ingredient") {
     // Ingredients cannot be produced - must be consumed from stock
     const needed = quantity;
-    const current = availableStock.get(nodeId) || 0;
+    const current = Math.max(availableStock.get(nodeId) || 0, 0);
     if (current < needed) {
       return { 
         success: false, 
@@ -106,7 +106,10 @@ function ensureConsumable(
   }
 
   // First, consume from existing stock
-  const existingStock = availableStock.get(nodeId) || 0;
+  const existingStock = Math.max(availableStock.get(nodeId) || 0, 0);
+  if (availableStock.get(nodeId) !== undefined && availableStock.get(nodeId)! < 0) {
+    availableStock.set(nodeId, existingStock);
+  }
   const fromStock = Math.min(existingStock, quantity);
   const shortfall = quantity - fromStock;
 

@@ -1,12 +1,16 @@
 import { useState, useEffect, useRef } from "preact/hooks";
 import { useSignalEffect } from "@preact/signals";
 import type { Node, NodeId, ProductionSimulation } from "../domain/types.ts";
-import { eventBus } from "../events/bus.ts";
-import { productionSimulatorOpen, productionSimulatorTargetId } from "../state/entitySignals.ts";
+import { eventBus, emitStockChanged } from "../events/bus.ts";
+import { productionSimulatorOpen, productionSimulatorTargetId, activeWorkspaceTab } from "../state/entitySignals.ts";
 import { workingStockQuantities } from "../state/inventorySignals.ts";
 import { createEmptyGraph, addNode } from "../domain/dag.ts";
 import { checkStockAvailability } from "../domain/stock.ts";
 import { convertToDisplay } from "../utils/units.ts";
+
+interface ProductionSimulatorProps {
+  inline?: boolean;
+}
 
 interface SimulationHistory {
   id: string;
@@ -22,7 +26,7 @@ interface InputTreeNode {
   children: InputTreeNode[];
 }
 
-export default function ProductionSimulator() {
+export default function ProductionSimulator({ inline = false }: ProductionSimulatorProps = {}) {
   const [quantity, setQuantity] = useState(1);
   const [maxQuantity, setMaxQuantity] = useState<number | null>(null);
   const [loadingMax, setLoadingMax] = useState(false);
@@ -55,21 +59,41 @@ export default function ProductionSimulator() {
       unsubscribe();
     };
   }, []);
+
+  // Refresh max producible when stocks change (e.g., after rollback or external stock updates)
+  useEffect(() => {
+    const unsubscribe = eventBus.subscribe("STOCK_CHANGED", () => {
+      const isActive = inline
+        ? activeWorkspaceTab.value === "produce" && !!productionSimulatorTargetId.value
+        : productionSimulatorOpen.value && !!productionSimulatorTargetId.value;
+      if (!isActive) return;
+      // Clear current simulation and refresh max based on latest stocks
+      setSimulation(null);
+      loadMaxProducible();
+    });
+
+    return () => {
+      unsubscribe();
+    };
+  }, [inline]);
   
-  // Auto-load max producible when modal opens
+  // Auto-load max producible when modal opens or when produce tab is active
   useEffect(() => {
     const isOpen = productionSimulatorOpen.value;
+    const isProduceTab = activeWorkspaceTab.value === "produce";
     const wasOpen = prevOpenRef.current;
     prevOpenRef.current = isOpen;
     
-    if (isOpen && !wasOpen && productionSimulatorTargetId.value) {
+    const shouldLoad = inline ? (isProduceTab && productionSimulatorTargetId.value) : (isOpen && !wasOpen && productionSimulatorTargetId.value);
+    
+    if (shouldLoad) {
       setSimulation(null);
       setQuantity(1);
       setMaxQuantity(null);
       setError(null);
       loadMaxProducible();
     }
-  }, [productionSimulatorOpen.value, productionSimulatorTargetId.value]);
+  }, [productionSimulatorOpen.value, productionSimulatorTargetId.value, activeWorkspaceTab.value, inline]);
 
   async function loadMaxProducible() {
     const currentSelectedNodeId = productionSimulatorTargetId.value;
@@ -444,8 +468,10 @@ export default function ProductionSimulator() {
   }
   
   function handleClose() {
-    productionSimulatorOpen.value = false;
-    productionSimulatorTargetId.value = null;
+    if (!inline) {
+      productionSimulatorOpen.value = false;
+      productionSimulatorTargetId.value = null;
+    }
     setSimulation(null);
     setQuantity(1);
     setMaxQuantity(null);
@@ -469,10 +495,12 @@ export default function ProductionSimulator() {
     setError(null);
     
     try {
+      // In inline mode (Produce tab), use persisted mode to create orders
+      // In modal mode, use working-copy mode if available
       const working = workingStockQuantities.value;
-      const stockOverrides = working
-        ? Array.from(working.entries()).map(([nodeId, quantity]) => ({ nodeId, quantity }))
-        : undefined;
+      const stockOverrides = (inline || !working)
+        ? undefined  // Use persisted mode in Produce tab
+        : Array.from(working.entries()).map(([nodeId, quantity]) => ({ nodeId, quantity }));
 
       const response = await fetch("/api/production/execute", {
         method: "POST",
@@ -533,8 +561,39 @@ export default function ProductionSimulator() {
         setQuantity(Math.max(1, maxQuantity));
       }
       
-      // Production successful - refresh simulation to show updated stock
-      await handleSimulate();
+      // If in persisted mode (no stockOverrides in result), reload stocks and refresh orders
+      if (!result.updatedStockOverrides) {
+        // Persisted production - emit stock changed event for all affected nodes
+        // The backend already emitted these, but we emit here too for frontend reactivity
+        if (simulation.stockOutcome) {
+          for (const outcome of simulation.stockOutcome) {
+            await emitStockChanged(outcome.nodeId, outcome.after, outcome.before);
+          }
+        }
+        
+        // Small delay to ensure backend has processed the order
+        await new Promise(resolve => setTimeout(resolve, 100));
+        
+        // Emit a generic stock changed event to trigger orders panel refresh
+        await emitStockChanged(currentSelectedNodeId, 0, 0);
+        
+        // Reload max producible with updated stock (prevents infinite production)
+        await loadMaxProducible();
+        
+        // Reset simulator to initial state: clear simulation, reset quantity, clear error
+        setSimulation(null);
+        setQuantity(maxQuantity !== null && maxQuantity > 0 ? Math.min(quantity, maxQuantity) : 1);
+        setError(null);
+      } else {
+        // Working-copy mode - update working copy
+        // Reload max producible with updated stock (prevents infinite production)
+        await loadMaxProducible();
+        
+        // Reset simulator to initial state: clear simulation, reset quantity, clear error
+        setSimulation(null);
+        setQuantity(maxQuantity !== null && maxQuantity > 0 ? Math.min(quantity, maxQuantity) : 1);
+        setError(null);
+      }
       
       // Show success message briefly
       setError(null);
@@ -545,58 +604,53 @@ export default function ProductionSimulator() {
     }
   }
   
-  // Always return JSX and read signals in JSX for reactivity
-  // Match EntityManager pattern exactly
-  return (
-    <>
-      {productionSimulatorOpen.value && productionSimulatorTargetId.value && (() => {
-        const selectedNodeId = productionSimulatorTargetId.value;
-        const selectedNode = nodes.find(n => n.id === selectedNodeId);
-        if (!selectedNodeId || !selectedNode) return null;
-        
-        return (
-          <div
-      style={{
-        position: "fixed",
-        inset: 0,
-        background: "rgba(0,0,0,0.35)",
+  // Determine if simulator should be visible
+  const shouldShow = inline
+    ? (activeWorkspaceTab.value === "produce" && productionSimulatorTargetId.value)
+    : productionSimulatorOpen.value && productionSimulatorTargetId.value;
+
+  if (!shouldShow) {
+    return null;
+  }
+
+  const selectedNodeId = productionSimulatorTargetId.value;
+  const selectedNode = nodes.find(n => n.id === selectedNodeId);
+  if (!selectedNodeId || !selectedNode) return null;
+
+  const content = (
+    <div
+      style={inline ? {
         display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
+        flexDirection: "column",
+        height: "100%",
+      } : {
+        background: "#fff",
+        borderRadius: "8px",
         padding: "1rem",
-        zIndex: 20,
+        maxWidth: "800px",
+        width: "100%",
+        maxHeight: "90vh",
+        overflowY: "auto",
+        boxShadow: "0 10px 25px rgba(0,0,0,0.1)",
       }}
-      onClick={(e) => {
-        // Close on overlay click
-        if (e.target === e.currentTarget) {
-          handleClose();
-        }
-      }}
+      onClick={(e) => inline ? undefined : e.stopPropagation()}
     >
-      <div
-        style={{
-          background: "#fff",
-          borderRadius: "8px",
-          padding: "1rem",
-          maxWidth: "800px",
-          width: "100%",
-          maxHeight: "90vh",
-          overflowY: "auto",
-          boxShadow: "0 10px 25px rgba(0,0,0,0.1)",
-        }}
-        onClick={(e) => e.stopPropagation()}
-      >
+      {!inline && (
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1rem" }}>
           <h2 style={{ margin: 0 }}>Production Simulator</h2>
           <button
             class="button button-secondary"
-            onClick={(e) => {
-              handleClose();
-            }}
+            onClick={handleClose}
           >
             Cancel
           </button>
         </div>
+      )}
+      {inline && (
+        <div style={{ marginBottom: "1rem" }}>
+          <h2 style={{ margin: 0 }}>Production Simulator</h2>
+        </div>
+      )}
         
         {error && <div class="error">{error}</div>}
 
@@ -606,7 +660,7 @@ export default function ProductionSimulator() {
           </div>
         ) : maxQuantity !== null ? (
           <>
-            <div style={{ display: "flex", gap: "1rem", marginBottom: "1rem" }}>
+            <div style={{ display: "flex", gap: "1rem", marginBottom: "1rem", alignItems: "stretch" }}>
               {selectedNode && (
                 <div style={{ flex: 1, padding: "0.75rem", background: "#f9fafb", borderRadius: "4px" }}>
                   <div class="info-box-content">
@@ -629,11 +683,45 @@ export default function ProductionSimulator() {
                   </div>
                 )}
               </div>
+
+              <div
+                class="form-group"
+                style={{
+                  flex: 1,
+                  padding: "0.75rem",
+                  background: "#f9fafb",
+                  borderRadius: "4px",
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: "0.5rem",
+                }}
+              >
+                <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: "0.75rem" }}>
+                  <label class="label" style={{ margin: 0, flex: "0 0 auto" }}>Quantity</label>
+                  <input
+                    type="number"
+                    class="input"
+                    value={quantity}
+                    onInput={(e) => {
+                      const val = parseInt((e.target as HTMLInputElement).value, 10) || 0;
+                      const clamped = Math.max(1, Math.min(maxQuantity, val));
+                      setQuantity(clamped);
+                    }}
+                    min="1"
+                    max={maxQuantity}
+                    step="1"
+                    style={{ width: "150px", flex: "0 0 auto" }}
+                  />
+                </div>
+                <div style={{ fontSize: "0.75rem", color: "#6b7280" }}>
+                  Enter a value between 1 and {maxQuantity}
+                </div>
+              </div>
             </div>
 
             {maxQuantity > 0 && (
               <>
-                <div style={{ display: "flex", gap: "1rem", marginBottom: "1rem", alignItems: "flex-start" }}>
+                <div style={{ display: "flex", marginBottom: "1rem" }}>
                   <button
                     class="button"
                     onClick={(e) => {
@@ -644,29 +732,6 @@ export default function ProductionSimulator() {
                   >
                     {loading ? "Simulating..." : "Simulate Production"}
                   </button>
-                  
-                  <div class="form-group" style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "flex-end" }}>
-                    <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: "0.75rem", marginBottom: "0.5rem" }}>
-                      <label class="label" style={{ margin: 0, flex: "0 0 auto" }}>Quantity</label>
-                      <input
-                        type="number"
-                        class="input"
-                        value={quantity}
-                        onInput={(e) => {
-                          const val = parseInt((e.target as HTMLInputElement).value, 10) || 0;
-                          const clamped = Math.max(1, Math.min(maxQuantity, val));
-                          setQuantity(clamped);
-                        }}
-                        min="1"
-                        max={maxQuantity}
-                        step="1"
-                        style={{ width: "150px", flex: "0 0 auto" }}
-                      />
-                    </div>
-                    <div style={{ fontSize: "0.75rem", color: "#6b7280" }}>
-                      Enter a value between 1 and {maxQuantity}
-                    </div>
-                  </div>
                 </div>
               </>
             )}
@@ -806,10 +871,32 @@ export default function ProductionSimulator() {
             </div>
           </div>
         )}
-          </div>
-        </div>
-        );
-      })()}
-    </>
+    </div>
+  );
+
+  if (inline) {
+    return content;
+  }
+
+  return (
+    <div
+      style={{
+        position: "fixed",
+        inset: 0,
+        background: "rgba(0,0,0,0.35)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        padding: "1rem",
+        zIndex: 20,
+      }}
+      onClick={(e) => {
+        if (e.target === e.currentTarget) {
+          handleClose();
+        }
+      }}
+    >
+      {content}
+    </div>
   );
 }
