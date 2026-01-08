@@ -58,13 +58,16 @@ export const handler: Handlers = {
       if (Array.isArray(data.stockOverrides)) {
         for (const s of data.stockOverrides) {
           if (!s?.nodeId || typeof s.nodeId !== "string") continue;
-          if (typeof s.quantity !== "number" || !Number.isFinite(s.quantity) || s.quantity < 0) {
+          if (typeof s.quantity !== "number" || !Number.isFinite(s.quantity)) {
             return new Response(
               JSON.stringify({ error: `Invalid stockOverrides quantity for node ${s.nodeId}` }),
               { status: 400, headers: { "Content-Type": "application/json" } },
             );
           }
-          currentStock.set(s.nodeId, s.quantity);
+          // Allow negative overrides (can happen after out-of-order rollbacks for intermediates)
+          // but clamp them to zero for the calculation so we don't reject valid working copies.
+          const qty = Math.max(0, s.quantity);
+          currentStock.set(s.nodeId, qty);
         }
       } else {
         // Fall back to persisted stock from active inventory

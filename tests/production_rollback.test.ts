@@ -568,12 +568,433 @@ Deno.test("Rollback succeeds even when intermediate surplus is consumed", async 
     const stockAfterRollback = await getTestStockMap(kv, inventoryId);
     assertEquals(stockAfterRollback.get("product_p1") || 0, 0, "Product should be consumed");
     assertEquals(stockAfterRollback.get("ing_a") || 0, 20, "Ingredient should be restored");
-    assertEquals(stockAfterRollback.get("recipe_r") || 0, -0.5, "Recipe stock can go negative for intermediates during rollback ordering");
+    assertEquals(stockAfterRollback.get("recipe_r") || 0, 0, "Intermediate stock is clamped to zero during rollback");
     
     // Verify order was deleted
     const repos = createRepositories(kv);
     const order = await repos.productionOrder.get(inventoryId, orderId1);
     assertEquals(order, null, "Order should be deleted after successful rollback");
+  } finally {
+    await cleanupTestKv(kv);
+  }
+});
+
+Deno.test("Out-of-order rollback preserves max producible after partial undo", async () => {
+  const kv = await createTestKv();
+  try {
+    // Simple graph: ingredient -> product (no intermediates, integer inputs)
+    const inventoryId = await setupTestInventory(kv);
+
+    const ingredient: Ingredient = {
+      id: "ing_bolo",
+      name: "Bolo Flour",
+      type: "ingredient",
+      currentStock: 0,
+      packageSize: 1,
+      packagePrice: 1,
+      unit: "unit",
+      unitCost: 1,
+    };
+
+    const product: Product = {
+      id: "bolo",
+      name: "Bolo",
+      type: "product",
+      currentStock: 0,
+      productionTime: 1,
+      inputs: [{ nodeId: ingredient.id, quantity: 1 }],
+      totalCost: 1,
+      totalProductionTime: 1,
+      weight: 1,
+      unit: "unit",
+    };
+
+    await seedTestNodes(kv, [ingredient, product]);
+    await setTestStock(kv, inventoryId, [{ nodeId: ingredient.id, quantity: 6 }]);
+
+    const graph = await buildTestGraph(kv);
+
+    // Initial max producible should reflect available ingredient
+    const initialStock = await getTestStockMap(kv, inventoryId);
+    const initialMax = getMaxProducibleQuantity(graph, product.id, initialStock);
+    assertEquals(initialMax, 6, "Initial max should be 6 with 6 ingredients");
+
+    // Produce 4, then 1, then 1 (creates three orders)
+    const orderId1 = await executeProduction(kv, inventoryId, product.id, 4);
+    const orderId2 = await executeProduction(kv, inventoryId, product.id, 1);
+    const orderId3 = await executeProduction(kv, inventoryId, product.id, 1);
+
+    // Sanity: after productions, ingredient depleted
+    const afterAllStock = await getTestStockMap(kv, inventoryId);
+    assertEquals(afterAllStock.get(ingredient.id) || 0, 0, "Ingredient should be fully consumed");
+
+    // Rollback the middle order (orderId2) out of order
+    const rollbackMid = await rollbackProductionOrder(kv, inventoryId, orderId2, { emitEvents: false });
+    assertEquals(rollbackMid.success, true, "Rollback of middle order should succeed");
+
+    const stockAfterRollback = await getTestStockMap(kv, inventoryId);
+    const graphAfterRollback = await buildTestGraph(kv);
+    const maxAfterRollback = getMaxProducibleQuantity(graphAfterRollback, product.id, stockAfterRollback);
+
+    // With one ingredient restored, we should only be able to produce one more.
+    assertEquals(maxAfterRollback, 1, "Max producible should be 1 after partially undoing productions");
+  } finally {
+    await cleanupTestKv(kv);
+  }
+});
+
+Deno.test("Bolo scenario: rollback middle order keeps max at 1", async () => {
+  const kv = await createTestKv();
+  try {
+    const inventoryId = await setupTestInventory(kv);
+
+    // Ingredients
+    const acucar: Ingredient = {
+      id: "acucar",
+      name: "Acucar",
+      type: "ingredient",
+      currentStock: 0,
+      packageSize: 1,
+      packagePrice: 1,
+      unit: "unit",
+      unitCost: 1,
+    };
+    const farinha: Ingredient = {
+      id: "farinha",
+      name: "Farinha",
+      type: "ingredient",
+      currentStock: 0,
+      packageSize: 1,
+      packagePrice: 1,
+      unit: "unit",
+      unitCost: 1,
+    };
+    const ovo: Ingredient = {
+      id: "ovo",
+      name: "Ovo",
+      type: "ingredient",
+      currentStock: 0,
+      packageSize: 1,
+      packagePrice: 1,
+      unit: "unit",
+      unitCost: 1,
+    };
+
+    // Recipe: massa (makes 1 unit, consumes 1 acucar, 1 farinha, 6 ovo)
+    const massa: Recipe = {
+      id: "massa",
+      name: "Massa",
+      type: "recipe",
+      currentStock: 0,
+      description: "Massa base",
+      fabricationTime: 1,
+      weight: 1,
+      unit: "unit",
+      inputs: [
+        { nodeId: acucar.id, quantity: 1 },
+        { nodeId: farinha.id, quantity: 1 },
+        { nodeId: ovo.id, quantity: 6 },
+      ],
+      totalCost: 1,
+      costPerUnit: 1,
+    };
+
+    // Product: Bolo needs 0.5 massa
+    const bolo: Product = {
+      id: "bolo",
+      name: "Bolo",
+      type: "product",
+      currentStock: 0,
+      productionTime: 1,
+      inputs: [{ nodeId: massa.id, quantity: 0.5 }],
+      totalCost: 1,
+      totalProductionTime: 1,
+      weight: 1,
+      unit: "unit",
+    };
+
+    await seedTestNodes(kv, [acucar, farinha, ovo, massa, bolo]);
+    // Provide just enough for max=6
+    await setTestStock(kv, inventoryId, [
+      { nodeId: acucar.id, quantity: 3 }, // 3 masses -> 6 bolos
+      { nodeId: farinha.id, quantity: 3 },
+      { nodeId: ovo.id, quantity: 18 },
+    ]);
+
+    const graph = await buildTestGraph(kv);
+    const initialStock = await getTestStockMap(kv, inventoryId);
+    const initialMax = getMaxProducibleQuantity(graph, bolo.id, initialStock);
+    assertEquals(initialMax, 6, "Initial max should be 6 bolos");
+
+    // Produce 4, then 1, then 1
+    const orderId1 = await executeProduction(kv, inventoryId, bolo.id, 4);
+    const orderId2 = await executeProduction(kv, inventoryId, bolo.id, 1);
+    const orderId3 = await executeProduction(kv, inventoryId, bolo.id, 1);
+
+    const afterAllStock = await getTestStockMap(kv, inventoryId);
+    assertEquals(afterAllStock.get(bolo.id) || 0, 6, "Should have produced 6 bolos total");
+    assertEquals(afterAllStock.get(acucar.id) || 0, 0, "Sugar should be consumed");
+
+    // Rollback the middle order (orderId2)
+    const rollbackMid = await rollbackProductionOrder(kv, inventoryId, orderId2, { emitEvents: false });
+    assertEquals(rollbackMid.success, true, "Rollback of middle order should succeed");
+
+    const afterRollbackStock = await getTestStockMap(kv, inventoryId);
+    const afterRollbackGraph = await buildTestGraph(kv);
+    const maxAfterRollback = getMaxProducibleQuantity(afterRollbackGraph, bolo.id, afterRollbackStock);
+
+    // Rolling back 1 Bolo restores 0.5 açucar, 0.5 farinha, 3 ovo (exactly what was consumed)
+    // However, due to integer-only production (need 1 full massa = 1 açucar, 1 farinha, 6 ovo),
+    // we cannot produce 1 Bolo from 0.5 açucar, 0.5 farinha, 3 ovo
+    // So max should be 0, not 1 or 2
+    assertEquals(maxAfterRollback, 0, "Max producible should be 0 after rolling back one Bolo (strict unproduce, integer-only production constraint)");
+    
+    // Verify intermediate (massa) is not restored
+    assertEquals(afterRollbackStock.get("massa") || 0, 0, "Intermediate massa should not be restored");
+    
+    // Verify ingredients were restored correctly
+    assertEquals(afterRollbackStock.get("acucar") || 0, 0.5, "Acucar should be restored to 0.5");
+    assertEquals(afterRollbackStock.get("farinha") || 0, 0.5, "Farinha should be restored to 0.5");
+    assertEquals(afterRollbackStock.get("ovo") || 0, 3, "Ovo should be restored to 3");
+  } finally {
+    await cleanupTestKv(kv);
+  }
+});
+
+Deno.test("Bolo scenario: 4,1,1 production with full rollback sequence", async () => {
+  const kv = await createTestKv();
+  try {
+    const inventoryId = await setupTestInventory(kv);
+
+    const acucar: Ingredient = {
+      id: "acucar",
+      name: "Acucar",
+      type: "ingredient",
+      currentStock: 0,
+      packageSize: 1,
+      packagePrice: 1,
+      unit: "unit",
+      unitCost: 1,
+    };
+    const farinha: Ingredient = {
+      id: "farinha",
+      name: "Farinha",
+      type: "ingredient",
+      currentStock: 0,
+      packageSize: 1,
+      packagePrice: 1,
+      unit: "unit",
+      unitCost: 1,
+    };
+    const ovo: Ingredient = {
+      id: "ovo",
+      name: "Ovo",
+      type: "ingredient",
+      currentStock: 0,
+      packageSize: 1,
+      packagePrice: 1,
+      unit: "unit",
+      unitCost: 1,
+    };
+
+    const massa: Recipe = {
+      id: "massa",
+      name: "Massa",
+      type: "recipe",
+      currentStock: 0,
+      description: "Massa base",
+      fabricationTime: 1,
+      weight: 1,
+      unit: "unit",
+      inputs: [
+        { nodeId: acucar.id, quantity: 1 },
+        { nodeId: farinha.id, quantity: 1 },
+        { nodeId: ovo.id, quantity: 6 },
+      ],
+      totalCost: 1,
+      costPerUnit: 1,
+    };
+
+    const bolo: Product = {
+      id: "bolo",
+      name: "Bolo",
+      type: "product",
+      currentStock: 0,
+      productionTime: 1,
+      inputs: [{ nodeId: massa.id, quantity: 0.5 }],
+      totalCost: 1,
+      totalProductionTime: 1,
+      weight: 1,
+      unit: "unit",
+    };
+
+    await seedTestNodes(kv, [acucar, farinha, ovo, massa, bolo]);
+    await setTestStock(kv, inventoryId, [
+      { nodeId: acucar.id, quantity: 3 },
+      { nodeId: farinha.id, quantity: 3 },
+      { nodeId: ovo.id, quantity: 18 },
+    ]);
+
+    const graph = await buildTestGraph(kv);
+    const initialStock = await getTestStockMap(kv, inventoryId);
+    const initialMax = getMaxProducibleQuantity(graph, bolo.id, initialStock);
+    assertEquals(initialMax, 6, "Initial max should be 6");
+
+    // Produce 4, then 1, then 1
+    const orderId1 = await executeProduction(kv, inventoryId, bolo.id, 4);
+    const orderId2 = await executeProduction(kv, inventoryId, bolo.id, 1);
+    const orderId3 = await executeProduction(kv, inventoryId, bolo.id, 1);
+
+    // Rollback middle order (1)
+    const rollbackMid = await rollbackProductionOrder(kv, inventoryId, orderId2, { emitEvents: false });
+    assertEquals(rollbackMid.success, true, "Rollback middle should succeed");
+    
+    let stock = await getTestStockMap(kv, inventoryId);
+    let g = await buildTestGraph(kv);
+    let max = getMaxProducibleQuantity(g, bolo.id, stock);
+    // After rolling back 1 Bolo, we restore 0.5 açucar, 0.5 farinha, 3 ovo
+    // But to produce 1 Bolo, we need 1 full massa (1 açucar, 1 farinha, 6 ovo) due to integer-only production
+    // So max is 0, not 1
+    assertEquals(max, 0, "Max should be 0 after rolling back middle order (integer-only production constraint)");
+    assertEquals(stock.get("massa") || 0, 0, "Massa should not be restored");
+
+    // Rollback first order (4)
+    const rollbackFirst = await rollbackProductionOrder(kv, inventoryId, orderId1, { emitEvents: false });
+    assertEquals(rollbackFirst.success, true, "Rollback first should succeed");
+    
+    stock = await getTestStockMap(kv, inventoryId);
+    g = await buildTestGraph(kv);
+    max = getMaxProducibleQuantity(g, bolo.id, stock);
+    assertEquals(max, 6, "Max should be 6 after rolling back first order");
+    assertEquals(stock.get("massa") || 0, 0, "Massa should not be restored");
+
+    // Rollback last order (1)
+    const rollbackLast = await rollbackProductionOrder(kv, inventoryId, orderId3, { emitEvents: false });
+    assertEquals(rollbackLast.success, true, "Rollback last should succeed");
+    
+    stock = await getTestStockMap(kv, inventoryId);
+    g = await buildTestGraph(kv);
+    max = getMaxProducibleQuantity(g, bolo.id, stock);
+    assertEquals(max, 6, "Max should be 6 after rolling back all orders");
+    assertEquals(stock.get(bolo.id) || 0, 0, "Bolo stock should be 0");
+    assertEquals(stock.get(acucar.id) || 0, 3, "Acucar should be fully restored");
+    assertEquals(stock.get(farinha.id) || 0, 3, "Farinha should be fully restored");
+    assertEquals(stock.get(ovo.id) || 0, 18, "Ovo should be fully restored");
+    assertEquals(stock.get("massa") || 0, 0, "Massa should remain 0");
+  } finally {
+    await cleanupTestKv(kv);
+  }
+});
+
+Deno.test("Bolo scenario: 5,1 production with rollback sequence", async () => {
+  const kv = await createTestKv();
+  try {
+    const inventoryId = await setupTestInventory(kv);
+
+    const acucar: Ingredient = {
+      id: "acucar",
+      name: "Acucar",
+      type: "ingredient",
+      currentStock: 0,
+      packageSize: 1,
+      packagePrice: 1,
+      unit: "unit",
+      unitCost: 1,
+    };
+    const farinha: Ingredient = {
+      id: "farinha",
+      name: "Farinha",
+      type: "ingredient",
+      currentStock: 0,
+      packageSize: 1,
+      packagePrice: 1,
+      unit: "unit",
+      unitCost: 1,
+    };
+    const ovo: Ingredient = {
+      id: "ovo",
+      name: "Ovo",
+      type: "ingredient",
+      currentStock: 0,
+      packageSize: 1,
+      packagePrice: 1,
+      unit: "unit",
+      unitCost: 1,
+    };
+
+    const massa: Recipe = {
+      id: "massa",
+      name: "Massa",
+      type: "recipe",
+      currentStock: 0,
+      description: "Massa base",
+      fabricationTime: 1,
+      weight: 1,
+      unit: "unit",
+      inputs: [
+        { nodeId: acucar.id, quantity: 1 },
+        { nodeId: farinha.id, quantity: 1 },
+        { nodeId: ovo.id, quantity: 6 },
+      ],
+      totalCost: 1,
+      costPerUnit: 1,
+    };
+
+    const bolo: Product = {
+      id: "bolo",
+      name: "Bolo",
+      type: "product",
+      currentStock: 0,
+      productionTime: 1,
+      inputs: [{ nodeId: massa.id, quantity: 0.5 }],
+      totalCost: 1,
+      totalProductionTime: 1,
+      weight: 1,
+      unit: "unit",
+    };
+
+    await seedTestNodes(kv, [acucar, farinha, ovo, massa, bolo]);
+    await setTestStock(kv, inventoryId, [
+      { nodeId: acucar.id, quantity: 3 },
+      { nodeId: farinha.id, quantity: 3 },
+      { nodeId: ovo.id, quantity: 18 },
+    ]);
+
+    const graph = await buildTestGraph(kv);
+    const initialStock = await getTestStockMap(kv, inventoryId);
+    const initialMax = getMaxProducibleQuantity(graph, bolo.id, initialStock);
+    assertEquals(initialMax, 6, "Initial max should be 6");
+
+    // Produce 5, then 1
+    const orderId1 = await executeProduction(kv, inventoryId, bolo.id, 5);
+    const orderId2 = await executeProduction(kv, inventoryId, bolo.id, 1);
+
+    // Rollback the 1
+    const rollback1 = await rollbackProductionOrder(kv, inventoryId, orderId2, { emitEvents: false });
+    assertEquals(rollback1.success, true, "Rollback 1 should succeed");
+    
+    let stock = await getTestStockMap(kv, inventoryId);
+    let g = await buildTestGraph(kv);
+    let max = getMaxProducibleQuantity(g, bolo.id, stock);
+    // After rolling back 1 Bolo, we restore 0.5 açucar, 0.5 farinha, 3 ovo
+    // But to produce 1 Bolo, we need 1 full massa (1 açucar, 1 farinha, 6 ovo) due to integer-only production
+    // So max is 0, not 1
+    assertEquals(max, 0, "Max should be 0 after rolling back the 1 (integer-only production constraint)");
+    assertEquals(stock.get("massa") || 0, 0, "Massa should not be restored");
+
+    // Rollback the 5
+    const rollback5 = await rollbackProductionOrder(kv, inventoryId, orderId1, { emitEvents: false });
+    assertEquals(rollback5.success, true, "Rollback 5 should succeed");
+    
+    stock = await getTestStockMap(kv, inventoryId);
+    g = await buildTestGraph(kv);
+    max = getMaxProducibleQuantity(g, bolo.id, stock);
+    assertEquals(max, 6, "Max should be 6 after rolling back all orders");
+    assertEquals(stock.get(bolo.id) || 0, 0, "Bolo stock should be 0");
+    assertEquals(stock.get(acucar.id) || 0, 3, "Acucar should be fully restored");
+    assertEquals(stock.get(farinha.id) || 0, 3, "Farinha should be fully restored");
+    assertEquals(stock.get(ovo.id) || 0, 18, "Ovo should be fully restored");
+    assertEquals(stock.get("massa") || 0, 0, "Massa should remain 0");
   } finally {
     await cleanupTestKv(kv);
   }

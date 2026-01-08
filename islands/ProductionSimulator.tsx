@@ -69,13 +69,32 @@ export default function ProductionSimulator({ inline = false }: ProductionSimula
       if (!isActive) return;
       // Clear current simulation and refresh max based on latest stocks
       setSimulation(null);
+      refreshWorkingStockFromServer().finally(() => {
       loadMaxProducible();
+      });
     });
 
     return () => {
       unsubscribe();
     };
   }, [inline]);
+
+  // Sync working copy with latest persisted stock (used when rollbacks happen outside StockDashboard).
+  async function refreshWorkingStockFromServer() {
+    try {
+      const res = await fetch("/api/stock");
+      if (!res.ok) return;
+      const stocks: Array<{ nodeId: string; quantity: number }> = await res.json();
+      const map = new Map<NodeId, number>();
+      for (const s of stocks) {
+        if (!s?.nodeId || typeof s.quantity !== "number" || !Number.isFinite(s.quantity)) continue;
+        map.set(s.nodeId, s.quantity);
+      }
+      workingStockQuantities.value = map;
+    } catch (_err) {
+      // Best-effort; if it fails we'll still reload max using existing overrides.
+    }
+  }
   
   // Auto-load max producible when modal opens or when produce tab is active
   useEffect(() => {
